@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
-// The third flash image. An extension module needs 96 KiB of ITCM and 192 KiB
-// of DTCM at fixed addresses, which the ordinary minimal image cannot give it
+// The third flash image. An extension module needs up to 128 KiB of ITCM and
+// 192 KiB of DTCM at fixed addresses, which the ordinary minimal image cannot give it
 // while still holding a megabyte of cartridge. So the loader builds a separate
 // image with that memory map and boots into it, and the other two images shrink
 // to make room.
@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import { CODE_BASE_128K, SERVICE } from './extension.mjs';
 import { FLASH_BASE, MAIN_BASE, VM_BASE, VM_LIMIT } from './hex.mjs';
 
 const read = (p) => fs.readFileSync(p, 'utf8');
@@ -55,10 +56,14 @@ export function mainLinkerScript(linkers) {
 }
 
 // How much of ITCM the host's own code may fill. 64 KiB leaves 0x10000-0x18000
-// free below the module window; 96 KiB fills it, for a third-party host that
-// needs the room and does not offer modules the space.
+// free for the 128 KiB module window; 96 KiB fills it, for a third-party host
+// that needs the room and does not offer modules the space.
 export const HOST_CODE_KIB = [64, 96];
 export const DEFAULT_HOST_CODE_KIB = 64;
+
+// Service bit 21 lends modules ITCM from CODE_BASE_128K, so only a host whose
+// budget ends there may serve it. The stock host reads this out of its link.
+export const hostServesCode128K = (hostCodeKiB) => hostCodeKiB * 1024 <= CODE_BASE_128K;
 
 // Libraries whose code runs from flash rather than ITCM, which is what fits the
 // stock host in 64 KiB. Matched by their arduino-cli build path. Only .text
@@ -68,7 +73,7 @@ const FLASH_RESIDENT_LIBRARIES = ['SdFat', 'SD', 'SPI'];
 const PATH_SEPARATOR = '[/\\\\]';
 
 // The extension image: relocated to its own slot, its ITCM footprint pinned and
-// its heap capped, with five ASSERTs that turn a host/module layout regression
+// its heap capped, with ASSERTs that turn a host/module layout regression
 // into a link error instead of a hang on hardware.
 export function extensionLinkerScript(linkers, hostCodeKiB = DEFAULT_HOST_CODE_KIB) {
   assert(HOST_CODE_KIB.includes(hostCodeKiB), 'Host code budget must be 64 or 96 KiB');
@@ -80,8 +85,8 @@ export function extensionLinkerScript(linkers, hostCodeKiB = DEFAULT_HOST_CODE_K
   ld = replaceOnce(ld, '\t\t*(.progmem*)\n', '\t\t*(.progmem*)\n' +
     FLASH_RESIDENT_LIBRARIES.map((name) =>
       `\t\t*${PATH_SEPARATOR}libraries${PATH_SEPARATOR}${name}${PATH_SEPARATOR}*(.text*)\n`).join(''));
-  // Pin the host to six 32 KiB ITCM blocks, so the module window at 0x18000
-  // cannot be pushed around by a change in host code size.
+  // Pin the host to six 32 KiB ITCM blocks, so the module windows cannot be
+  // pushed around by a change in host code size.
   ld = replaceOnce(ld, '_itcm_block_count = (SIZEOF(.text.itcm) + SIZEOF(.ARM.exidx) + 0x7FFF) >> 15;',
     '_itcm_block_count = 6;');
   // The host keeps a 16 KiB heap immediately after its own bss. Everything from
@@ -103,6 +108,8 @@ export function extensionLinkerScript(linkers, hostCodeKiB = DEFAULT_HOST_CODE_K
     `_teensy_model_identifier = 0x25;
       _vm_data_start = 0x20014000; _vm_data_end = 0x20044000;
       ASSERT(__exidx_end <= 0x${(hostCodeKiB * 1024).toString(16)}, "Host code exceeds its ${hostCodeKiB} KiB ITCM budget")
+      _vm_host_code_128k_service = 0x${(hostServesCode128K(hostCodeKiB) ? SERVICE.CODE_128K : 0).toString(16)};
+      ASSERT(_vm_host_code_128k_service == 0 || __exidx_end <= 0x${CODE_BASE_128K.toString(16)}, "Host serves the 128 KiB module window over its own code")
       ASSERT(_heap_end <= _vm_data_start, "Host heap overlaps the module DTCM window")
       ASSERT(_estack - _vm_data_end >= 49152, "Shared stack below 48 KiB")
       ASSERT(SIZEOF(.bss.dma) == 0, "Host globals overlap the guest RAM2 arena")

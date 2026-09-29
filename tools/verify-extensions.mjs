@@ -13,8 +13,8 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { hostPackageFixture, registryFixture } from './lib/fixtures.mjs';
-import { ASSIGNED_SERVICES, BASE_SERVICES, PROTECTED_EXTENSIONS, RAM_BYTES, RAM_RESERVED_BYTES,
-         RAM2_RO_BYTES, SERVICE, hostSlotValid, hostNameSafe,
+import { ASSIGNED_SERVICES, BASE_SERVICES, HOST_SERVICES, CODE_BASE, CODE_BASE_128K, CODE_LIMIT, PROTECTED_EXTENSIONS,
+         RAM_BYTES, RAM_RESERVED_BYTES, RAM2_RO_BYTES, SERVICE, hostSlotValid, hostNameSafe,
          hostFileStem } from './lib/extension.mjs';
 import { VM_BASE, VM_LIMIT } from './lib/hex.mjs';
 import { readSource } from './lib/source-text.mjs';
@@ -63,7 +63,7 @@ const HOST_README = 'vm/abi/README.md';
 // asked in advance. No native test compiles VMHost.h, so read the call.
 function checkHostAdmission() {
   const host = sourceOf('Source/Teensy/MinimalBoot/VMHost.h');
-  if (!/!vm_host_serves\(h, providedServices\)/.test(host)) {
+  if (!/!vm_host_serves\(h, providedServices\(\)\)/.test(host)) {
     throw new Error('VMHost.h loadModule() no longer refuses an image whose services it cannot provide');
   }
   console.log('PASS: the extension image refuses a module it cannot serve, via vm_host_serves');
@@ -160,6 +160,22 @@ function checkRam2Sizes() {
   console.log('PASS: tools/lib/extension.mjs RAM2 sizes match VM_RAM_* in VMABI.h');
 }
 
+// The code windows are mirrored in tools/lib/extension.mjs, and the extension
+// linker script decides service bit 21 from CODE_BASE_128K, so a mirror that
+// drifted would serve the bit over host code.
+function checkCodeWindows() {
+  const header = sourceOf(MODULE_ABI);
+  for (const [name, mirrored] of [['VM_CODE_BASE', CODE_BASE], ['VM_CODE_BASE_128K', CODE_BASE_128K],
+                                  ['VM_CODE_LIMIT', CODE_LIMIT]]) {
+    const match = header.match(new RegExp(`\\b${name}\\s*=\\s*(0x[0-9a-fA-F]+)\\b`));
+    if (!match) throw new Error(`VMABI.h no longer defines ${name} as a hex literal`);
+    if (parseInt(match[1], 16) !== mirrored) {
+      throw new Error(`${name} is ${match[1]} in VMABI.h, but tools/lib/extension.mjs mirrors it as 0x${mirrored.toString(16)}`);
+    }
+  }
+  console.log('PASS: tools/lib/extension.mjs code windows match VM_CODE_* in VMABI.h');
+}
+
 // The EEPROM addresses and boot-indicator values a host needs are duplicated
 // out of Common_Defs.h, which is firmware-wide and must never be included by a
 // vendor. Both do reach one translation unit in each firmware build, so a
@@ -207,7 +223,8 @@ function checkServiceRegistry() {
                                   ['VM_SERVICE_WRITE', SERVICE.WRITE],
                                   ['VM_SERVICE_GUEST_RAM', SERVICE.GUEST_RAM],
                                   ['VM_SERVICE_RAM2_RO', SERVICE.RAM2_RO],
-                                  ['VM_SERVICE_EXIT', SERVICE.EXIT]]) {
+                                  ['VM_SERVICE_EXIT', SERVICE.EXIT],
+                                  ['VM_SERVICE_CODE_128K', SERVICE.CODE_128K]]) {
     const declared = orList(name);
     if (declared !== mirrored) {
       throw new Error(`${name} is 0x${declared.toString(16)} in VMABI.h, but ` +
@@ -216,12 +233,13 @@ function checkServiceRegistry() {
   }
   // A bit this loader starts providing lands here, and the packager would go
   // on refusing it as unassigned. It is named terms rather than literals, so
-  // compare the expression against the one extension.mjs derives.
+  // resolve each term through its own definition and compare the value.
   const hostServices = header.match(/\bVM_HOST_SERVICES\s*=\s*([^,}]+?)\s*,/);
   if (!hostServices) throw new Error('VMABI.h no longer defines VM_HOST_SERVICES');
-  if (hostServices[1] !== 'VM_SERVICES|VM_SERVICE_RAM2_RO|VM_SERVICE_EXIT') {
-    throw new Error(`VM_HOST_SERVICES is ${hostServices[1]} in VMABI.h, but tools/lib/extension.mjs ` +
-                    'derives HOST_SERVICES as BASE_SERVICES | SERVICE.RAM2_RO | SERVICE.EXIT');
+  const declaredHost = hostServices[1].split('|').reduce((bits, term) => bits | orList(term.trim()), 0) >>> 0;
+  if (declaredHost !== HOST_SERVICES) {
+    throw new Error(`VM_HOST_SERVICES is 0x${declaredHost.toString(16)} (${hostServices[1]}) in VMABI.h, but ` +
+                    `tools/lib/extension.mjs derives HOST_SERVICES as 0x${HOST_SERVICES.toString(16)}`);
   }
   console.log('PASS: the service registry and base profile in tools/lib/extension.mjs match VMABI.h');
 }
@@ -360,6 +378,7 @@ checkProtectedExtensions();
 checkEepromProtocol();
 checkHostNamePolicy();
 checkRam2Sizes();
+checkCodeWindows();
 checkServiceRegistry();
 checkPublishedIncludes();
 checkPublishedHeadersStandalone();

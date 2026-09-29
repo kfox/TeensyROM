@@ -30,7 +30,13 @@
 // hands out the rest one host at a time, so two hosts cannot pick the same
 // number; an assignment binds the number for good and says nothing about which
 // host implements it.
+//
+// Module code runs from code_base to VM_CODE_LIMIT in ITCM: 96 KiB from
+// VM_CODE_BASE, or 128 KiB from VM_CODE_BASE_128K for an image that requires
+// VM_SERVICE_CODE_128K. The larger window overlaps ITCM a host may keep for its
+// own code, so only a host that leaves it free serves the bit.
 enum : uint32_t { VM_ABI = 2, VM_CODE_BASE = 0x18000, VM_CODE_LIMIT = 0x30000,
+                  VM_CODE_BASE_128K = 0x10000,
                   VM_DATA_BASE = 0x20014000, VM_DATA_LIMIT = 0x20044000,
                   VM_DATA_BYTES = VM_DATA_LIMIT-VM_DATA_BASE,
                   VM_RAM_BASE = 0x20200000,
@@ -154,13 +160,16 @@ using VmEntry = const VmModule *(*)(const VmHost *host);
 //   14        this loader's module exit (VmHostExit, above)
 //   15        unassigned, available on request
 //   16        TeensyROM's own examples and conformance fixtures
-//   17..31    unassigned
+//   17..20    unassigned
+//   21        this loader's 128 KiB module code window (VM_CODE_BASE_128K)
+//   22..31    unassigned
 enum : uint32_t { VM_SERVICE_FILES=1, VM_SERVICE_CLOCK=2, VM_SERVICE_PACKETS=4,
                   VM_SERVICE_WRITE=8, VM_SERVICE_GUEST_RAM=16,
                   VM_SERVICE_RAM2_RO=128, VM_SERVICE_EXIT=16384,
+                  VM_SERVICE_CODE_128K=0x200000,
                   // The base profile, which every module may assume.
                   VM_SERVICES=31,
-                  VM_HOST_SERVICES=VM_SERVICES|VM_SERVICE_RAM2_RO|VM_SERVICE_EXIT,
+                  VM_HOST_SERVICES=VM_SERVICES|VM_SERVICE_RAM2_RO|VM_SERVICE_EXIT|VM_SERVICE_CODE_128K,
                   VM_SERVICES_ASSIGNED=32|64|256|512|1024|2048|4096|8192|0x10000,
                   VM_IMAGE_MAGIC=0x314d564d };
 static_assert((VM_HOST_SERVICES&VM_SERVICES_ASSIGNED)==0,
@@ -173,10 +182,17 @@ static inline uint32_t vm_crc32(const void *data, uint32_t size) {
 static inline uint32_t vm_image_ro_bytes(const VmImageHeader &h){return h.reserved[1];}
 static inline uint32_t vm_image_guest_bytes(const VmImageHeader &h){return h.reserved[0]==VM_PROFILE_RAM2_RO?uint32_t(VM_RAM2_GUEST_BYTES):uint32_t(VM_RAM_BYTES);}
 static inline uint32_t vm_image_payload_bytes(const VmImageHeader &h){return h.code_bytes+h.data_bytes+vm_image_ro_bytes(h);}
+// Where the image's code loads. VM_CODE_BASE_128K only for an image that also
+// requires VM_SERVICE_CODE_128K; VM_CODE_BASE for every other header, so a
+// code_base that is neither reads as the narrower window and fails validation.
+static inline uint32_t vm_image_code_base(const VmImageHeader &h){
+    const bool large=h.code_base==VM_CODE_BASE_128K&&(h.required_services&VM_SERVICE_CODE_128K);
+    return large?uint32_t(VM_CODE_BASE_128K):uint32_t(VM_CODE_BASE);
+}
 // Structure and self-consistency only. Whether a host can serve what an image
 // requires is vm_host_serves() in VMHostABI.h, which a host owes before it
 // loads. Bit 7 is judged here because it has to agree with the memory profile
-// in reserved[0].
+// in reserved[0], and bit 21 because it has to agree with code_base.
 static inline bool vm_valid_header(const VmImageHeader &h, uint32_t file_bytes) {
     if(h.reserved[2]||h.reserved[3])return false;
     if(h.reserved[0]==VM_PROFILE_LEGACY){
@@ -184,12 +200,13 @@ static inline bool vm_valid_header(const VmImageHeader &h, uint32_t file_bytes) 
     }else if(h.reserved[0]==VM_PROFILE_RAM2_RO){
         if(!(h.required_services&VM_SERVICE_RAM2_RO)||!h.reserved[1]||h.reserved[1]>VM_RAM2_RO_BYTES)return false;
     }else return false;
+    const uint32_t code_base=vm_image_code_base(h);
     if(h.magic!=VM_IMAGE_MAGIC || h.abi!=VM_ABI || h.header_bytes!=sizeof h ||
-       h.code_base!=VM_CODE_BASE || h.ram_base!=VM_DATA_BASE || !h.code_bytes ||
-       h.code_bytes>VM_CODE_LIMIT-VM_CODE_BASE || h.data_bytes>VM_DATA_BYTES ||
+       h.code_base!=code_base || h.ram_base!=VM_DATA_BASE || !h.code_bytes ||
+       h.code_bytes>VM_CODE_LIMIT-code_base || h.data_bytes>VM_DATA_BYTES ||
        h.bss_bytes>VM_DATA_BYTES-h.data_bytes ||
        file_bytes!=sizeof h+vm_image_payload_bytes(h) || !(h.entry&1) ||
-       (h.entry&~1u)<VM_CODE_BASE || (h.entry&~1u)>=VM_CODE_BASE+h.code_bytes) return false;
+       (h.entry&~1u)<code_base || (h.entry&~1u)>=code_base+h.code_bytes) return false;
     VmImageHeader check=h; check.header_crc=0;
     return vm_crc32(&check,sizeof check)==h.header_crc;
 }

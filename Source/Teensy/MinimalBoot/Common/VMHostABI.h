@@ -221,19 +221,44 @@ static inline bool vm_host_serves(const VmImageHeader &h, uint32_t provided) {
     return (h.required_services & ~provided) == 0;
 }
 
+// One MPU region: `bytes` is a power of two and `base` a multiple of it, as the
+// Cortex-M7 requires.
+struct VmMpuRegion { uint32_t base, bytes; };
+
+// The module code window as two MPU regions, index 0 and 1: from the image's
+// code base up to 0x20000, then the 64 KiB from there to VM_CODE_LIMIT. The
+// 96 KiB window is 32 KiB at 0x18000 plus 64 KiB; the 128 KiB one is 64 KiB at
+// 0x10000 plus 64 KiB, since a single 128 KiB region would have to start on a
+// 128 KiB boundary. A 96 KiB image leaves 0x10000..0x18000 to the core's
+// read-only ITCM region, as it was before the larger window existed.
+enum : uint32_t { VM_CODE_UPPER_REGION_BASE = 0x20000u };
+static inline VmMpuRegion vm_code_window_region(const VmImageHeader &h, unsigned index) {
+    const uint32_t base = index ? uint32_t(VM_CODE_UPPER_REGION_BASE) : vm_image_code_base(h);
+    const uint32_t limit = index ? uint32_t(VM_CODE_LIMIT) : uint32_t(VM_CODE_UPPER_REGION_BASE);
+    return { base, limit - base };
+}
+
+// RASR's SIZE field, which encodes a region of 2^(n+1) bytes as n.
+static inline uint32_t vm_mpu_size_field(uint32_t bytes) {
+    uint32_t n = 0;
+    while (n < 31 && (2u << n) < bytes) n++;
+    return n;
+}
+
 // The module's ITCM window is read-only at entry, because the core's MPU
 // region 1 covers all of ITCM, so the payload copy faults without this. Call
 // with true before copying code and false after, which also restores execute
-// permission.
+// permission. `h` must have passed vm_valid_header: it chooses the window.
 #if defined(__arm__)
-static inline void vm_host_code_window(bool writable) {
+static inline void vm_host_code_window(const VmImageHeader &h, bool writable) {
     uint32_t mask; __asm__ volatile("mrs %0, primask":"=r"(mask)); __disable_irq();
     __asm__ volatile("dsb":::"memory"); SCB_MPU_CTRL = 0;
-    // 96 KiB window: 32 KiB at 0x18000, then 64 KiB at 0x20000.
     for (unsigned i = 0; i < 2; i++) {
-        SCB_MPU_RBAR = (i ? 0x20000u : 0x18000u) | SCB_MPU_RBAR_VALID | (11 + i);
+        const VmMpuRegion region = vm_code_window_region(h, i);
+        SCB_MPU_RBAR = region.base | SCB_MPU_RBAR_VALID | (11 + i);
         SCB_MPU_RASR = SCB_MPU_RASR_TEX(1) | SCB_MPU_RASR_AP(writable ? 3 : 7) |
-            (writable ? SCB_MPU_RASR_XN : 0) | SCB_MPU_RASR_SIZE(i ? 15 : 14) | SCB_MPU_RASR_ENABLE;
+            (writable ? SCB_MPU_RASR_XN : 0) | SCB_MPU_RASR_SIZE(vm_mpu_size_field(region.bytes)) |
+            SCB_MPU_RASR_ENABLE;
     }
     SCB_MPU_CTRL = SCB_MPU_CTRL_ENABLE; __asm__ volatile("dsb\nisb":::"memory");
     if (!mask) __enable_irq();
@@ -259,14 +284,29 @@ template<class Reader> static bool vm_load_payload(const VmImageHeader &h,Reader
     memset(data+h.data_bytes,0,h.bss_bytes);return true;
 }
 
-// The table vm_entry returned. Every pointer in it must lie inside the code
-// actually loaded.
-static inline bool vm_module_table_valid(const VmModule *module, uint32_t code_bytes) {
-    const uintptr_t end = VM_CODE_BASE + code_bytes;
-    auto codePointer = [end](uintptr_t p) { return (p & 1) && (p & ~1u) >= VM_CODE_BASE && (p & ~1u) < end; };
-    const uintptr_t p = (uintptr_t)module;
-    return p >= VM_CODE_BASE && p <= VM_CODE_LIMIT - sizeof(VmModule) && module->abi == VM_ABI &&
-           module->bytes == sizeof(VmModule) && codePointer((uintptr_t)module->input) &&
-           codePointer((uintptr_t)module->pump) && codePointer((uintptr_t)module->packet) &&
-           codePointer((uintptr_t)module->ack);
+// Whether a module table at `p` lies inside the image's code window.
+static inline bool vm_module_table_placed(const VmImageHeader &h, uintptr_t p) {
+    return p >= vm_image_code_base(h) && p <= VM_CODE_LIMIT - sizeof(VmModule);
+}
+
+// Whether `p` is a Thumb function pointer into the code the image loaded.
+static inline bool vm_module_code_pointer(const VmImageHeader &h, uintptr_t p) {
+    const uintptr_t base = vm_image_code_base(h), address = p & ~uintptr_t(1);
+    return (p & 1) && address >= base && address < base + h.code_bytes;
+}
+
+// The fields of the table vm_entry returned, read from wherever it lies.
+static inline bool vm_module_fields_valid(const VmModule &module, const VmImageHeader &h) {
+    return module.abi == VM_ABI && module.bytes == sizeof(VmModule) &&
+           vm_module_code_pointer(h, (uintptr_t)module.input) &&
+           vm_module_code_pointer(h, (uintptr_t)module.pump) &&
+           vm_module_code_pointer(h, (uintptr_t)module.packet) &&
+           vm_module_code_pointer(h, (uintptr_t)module.ack);
+}
+
+// The table vm_entry returned, for the image `h` that was loaded. Every pointer
+// in it must lie inside that image's code: the table itself in its window, and
+// each callback in the code actually loaded.
+static inline bool vm_module_table_valid(const VmModule *module, const VmImageHeader &h) {
+    return vm_module_table_placed(h, (uintptr_t)module) && vm_module_fields_valid(*module, h);
 }

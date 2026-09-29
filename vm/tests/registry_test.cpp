@@ -74,6 +74,36 @@ int main(int argc,char **argv){
     assert(tryLaunch(rmtSD,"/","VENDOR.crt")&&!rebooted);
     assert(message.find("lacks service $10000")!=std::string::npos);
 
+    // An image in the 128 KiB code window is refused by number by a host that
+    // does not serve bit 21, and launched by one that does. Restamped from
+    // HELLO's own image: the packager writes only the 96 KiB window.
+    {
+        const auto module=base/"VMS/HELLO/engine.mvm";
+        std::ifstream in(module,std::ios::binary);
+        const std::string original{std::istreambuf_iterator<char>(in),{}};in.close();
+        auto restamp=[&](uint32_t services){
+            VmImageHeader h;memcpy(&h,original.data(),sizeof h);
+            h.code_base=VM_CODE_BASE_128K;h.entry=VM_CODE_BASE_128K|1;h.required_services=services;
+            h.header_crc=0;h.header_crc=vm_crc32(&h,sizeof h);
+            std::string image=original;memcpy(image.data(),&h,sizeof h);put(module,image);
+        };
+        restamp(VM_SERVICES|VM_SERVICE_CODE_128K);
+        VmBootImage::install(VM_HOST_SERVICES&~VM_SERVICE_CODE_128K);
+        message.clear();
+        assert(tryLaunch(rmtSD,"/","HELLO.crt")&&!rebooted);
+        assert(message.find("lacks service $200000")!=std::string::npos);
+        VmBootImage::install(VM_HOST_SERVICES);
+        message.clear();
+        assert(tryLaunch(rmtSD,"/","HELLO.crt")&&rebooted&&message.empty());
+        rebooted=false;
+        // Without the bit, 0x10000 is no window at all, whatever the host serves.
+        restamp(VM_SERVICES);
+        assert(tryLaunch(rmtSD,"/","HELLO.crt")&&!rebooted);
+        assert(message.find("failed validation")!=std::string::npos);
+        put(module,original);
+        message.clear();
+    }
+
     // A host that speaks another ABI would refuse every module this image can
     // validate, so that is knowable here too.
     VmBootImage::install(VM_HOST_SERVICES,VM_ABI+1);
@@ -249,6 +279,7 @@ int main(int argc,char **argv){
     puts("PASS: real registry/preflight over packager output; generic extension routing, client and "
          "content launch, one-shot record, ambiguity, traversal, malformed manifest, corrupt module and corrupt client, "
          "extension cache answering Unknown when unscanned, errored or over the limit, "
-         "a service belonging to another host refused by its number, and the same module "
+         "a service belonging to another host refused by its number, a 128 KiB image refused by number "
+         "by a host without bit 21 and launched by one with it, and the same module "
          "reaching the reboot when the installed host cannot say what it provides");
 }

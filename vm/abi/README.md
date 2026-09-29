@@ -95,7 +95,9 @@ number for good. It says nothing about who implements it.
 | 16384 | `VM_SERVICE_EXIT` | this loader | yes |
 | 32768 | — | unassigned, on request | no |
 | 65536 | examples and conformance | this repository | no |
-| 1<<17 .. 1<<31 | — | unassigned | no |
+| 1<<17 .. 1<<20 | — | unassigned | no |
+| 1<<21 | `VM_SERVICE_CODE_128K` | this loader | yes, when linked at 64 KiB (see §5) |
+| 1<<22 .. 1<<31 | — | unassigned | no |
 
 To claim a bit, open an issue naming the host and the callback it adds.
 
@@ -200,11 +202,11 @@ only) the RAM2 constants. `.bss` is not stored; the loader zeroes it.
 | 0 | `magic` | `0x314d564d` (`MVM1`) |
 | 4 | `abi` | 2 |
 | 8 | `header_bytes` | 64 |
-| 12 | `code_bytes` | ≤ 96 KiB |
+| 12 | `code_bytes` | ≤ `0x30000 - code_base`: 96 KiB, or 128 KiB at `0x00010000` |
 | 16 | `data_bytes` | |
 | 20 | `bss_bytes` | `data_bytes + bss_bytes` ≤ 192 KiB |
 | 24 | `entry` | Thumb bit set; inside the code window |
-| 28 | `code_base` | `0x00018000` |
+| 28 | `code_base` | `0x00018000`, or `0x00010000` when `required_services` has bit 21 |
 | 32 | `ram_base` | `0x20014000` |
 | 36 | `required_services` | see §2 |
 | 40 | `payload_crc` | CRC32 of everything after the header |
@@ -294,13 +296,18 @@ installed host in place.
 
 | Region | Address | Size | Owner |
 |--------|---------|-----:|-------|
-| ITCM | `0x00000000` | 96 KiB | host code |
+| ITCM | `0x00000000` | 64 KiB | host code (96 KiB on a host linked with `--host-code-kib 96`) |
 | ITCM | `0x00018000` | 96 KiB | **module code** |
+| ITCM | `0x00010000` | 128 KiB | **module code**, instead, for an image requiring bit 21 |
 | DTCM | below `0x20014000` | — | host state and heap |
 | DTCM | `0x20014000` | 192 KiB | **module `.data`, `.bss`, then workspace** |
 | DTCM | `0x20044000` | 48 KiB | shared stack |
 | RAM2 | `0x20200000` | 512 KiB | **guest arena** (416 KiB on profile 1) |
 | RAM2 | `0x2027ff60` | 160 bytes | loader record + Teensy's `CrashReport` (inside the profile-0 arena) |
+
+The 128 KiB window takes `0x10000..0x18000` as well, which is host code on a
+host linked at 96 KiB. Only a host linked at 64 KiB serves `VM_SERVICE_CODE_128K`,
+so any other refuses such an image by that bit like any other missing service.
 
 `workspace` is whatever is left of the 192 KiB DTCM window after the module's
 own `.data` and `.bss`, aligned up to 32 bytes. Size it by shrinking your static

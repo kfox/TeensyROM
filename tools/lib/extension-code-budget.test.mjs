@@ -2,18 +2,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import {extensionLinkerScript, HOST_CODE_KIB} from './extension-image.mjs';
-import {CODE_BASE} from './extension.mjs';
+import {extensionLinkerScript, hostServesCode128K, HOST_CODE_KIB} from './extension-image.mjs';
+import {CODE_BASE, CODE_BASE_128K, SERVICE} from './extension.mjs';
 
 const linkers = path.resolve(import.meta.dirname, '../BootLinkerFiles');
 const progmemBlock = (ld) => ld.slice(ld.indexOf('.text.progmem : {'), ld.indexOf('.text.itcm : {'));
 
-test('the stock host is linked at 64 KiB, and 96 KiB moves only its code ceiling', () => {
+test('the stock host is linked at 64 KiB, and 96 KiB moves its code ceiling and withdraws bit 21', () => {
   const stock = extensionLinkerScript(linkers);
   assert.equal(stock, extensionLinkerScript(linkers, 64));
   assert.match(stock, /ASSERT\(__exidx_end <= 0x10000,/);
-  assert.equal(extensionLinkerScript(linkers, 96), stock.replace(
-    '__exidx_end <= 0x10000, "Host code exceeds its 64 KiB', '__exidx_end <= 0x18000, "Host code exceeds its 96 KiB'));
+  assert.equal(extensionLinkerScript(linkers, 96), stock
+    .replace('__exidx_end <= 0x10000, "Host code exceeds its 64 KiB', '__exidx_end <= 0x18000, "Host code exceeds its 96 KiB')
+    .replace('_vm_host_code_128k_service = 0x200000;', '_vm_host_code_128k_service = 0x0;'));
   assert.match(stock, /_itcm_block_count = 6;/);
   for (const invalid of [0, 32, 65, 128, '64', NaN]) {
     assert.throws(() => extensionLinkerScript(linkers, invalid), /64 or 96/);
@@ -22,6 +23,22 @@ test('the stock host is linked at 64 KiB, and 96 KiB moves only its code ceiling
 
 test('no host code budget reaches into the module code window', () => {
   for (const kib of HOST_CODE_KIB) assert.ok(kib * 1024 <= CODE_BASE, `${kib} KiB`);
+});
+
+// VMHost.h takes bit 21 of its descriptor from this symbol, so the service and
+// the ceiling that makes it safe come out of one link.
+test('only a host whose code budget ends below the 128 KiB window serves bit 21', () => {
+  const served = (kib) => Number(extensionLinkerScript(linkers, kib)
+    .match(/_vm_host_code_128k_service = (0x[0-9a-f]+);/)[1]);
+  assert.equal(SERVICE.CODE_128K, 1 << 21);
+  assert.equal(served(64), SERVICE.CODE_128K);
+  assert.equal(served(96), 0);
+  assert.ok(hostServesCode128K(64) && !hostServesCode128K(96));
+  assert.equal(CODE_BASE_128K, 64 * 1024);
+  for (const kib of HOST_CODE_KIB) {
+    assert.match(extensionLinkerScript(linkers, kib),
+      /ASSERT\(_vm_host_code_128k_service == 0 \|\| __exidx_end <= 0x10000,/);
+  }
 });
 
 // ld matches a file-name pattern with fnmatch(pattern, name, 0): '*', '?', '[...]', and

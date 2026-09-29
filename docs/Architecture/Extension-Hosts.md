@@ -18,7 +18,7 @@ exists so that the four things a host actually owes can each be pointed at.
 ## Why a host is a separate image at all
 
 Not for isolation, and not for features — for the memory map. A module needs
-96 KiB of ITCM and 192 KiB of DTCM at *fixed* addresses, and the ordinary minimal
+up to 128 KiB of ITCM and 192 KiB of DTCM at *fixed* addresses, and the ordinary minimal
 image cannot give it those while still holding a megabyte of cartridge. So the
 build produces a third image with that map and the other two shrink to make room.
 `tools/lib/extension-image.mjs` generates the linker script that does it, and
@@ -27,6 +27,7 @@ turns a layout regression into a link error rather than a hang on hardware:
 | Assert | What it catches |
 |---|---|
 | `__exidx_end <= 0x10000` | host code outgrowing its 64 KiB of ITCM (`0x18000` with `--host-code-kib 96`) |
+| `_vm_host_code_128k_service == 0 \|\| __exidx_end <= 0x10000` | a host serving the 128 KiB module window (bit 21) over its own code |
 | `_heap_end <= _vm_data_start` | host heap growing into the module's DTCM window |
 | `_estack - _vm_data_end >= 49152` | the shared stack falling below 48 KiB |
 | `SIZEOF(.bss.dma) == 0` | host globals landing in the guest's RAM2 arena |
@@ -37,7 +38,10 @@ Those hold for your host too, because your host is built with the same script.
 The script also places the `.text` of the SdFat, SD and SPI libraries in flash
 rather than ITCM, which is what fits the stock host in 64 KiB. A host that needs
 more ITCM can pass `--host-code-kib 96` with `--host-sketch`, which lets its code
-grow up to the module window at `0x18000`.
+grow up to the module window at `0x18000`. That is the ITCM the 128 KiB module
+window (service bit 21) starts at `0x10000` to use, so a host linked that way
+must not serve the bit: the stock runtime takes it out of its descriptor, and the
+build refuses a 96 KiB host whose descriptor claims it.
 
 ## The four things a host owes
 
@@ -199,7 +203,7 @@ the whole command protocol is exposed to the LAN, unauthenticated.
 | | |
 |---|---|
 | Flash slot | 384 KiB at `0x60760000`, the top of flash below the EEPROM emulation; firmware updates leave it alone |
-| ITCM | 64 KiB for host code, or 96 KiB with `--host-code-kib 96` (module code takes `0x00018000` up) |
+| ITCM | 64 KiB for host code, or 96 KiB with `--host-code-kib 96` (module code takes `0x00018000` up, or `0x00010000` up for a module requiring bit 21) |
 | DTCM | everything below `0x20014000`, heap capped at 16 KiB |
 | Stack | 48 KiB, shared |
 | RAM2 | 512 KiB — the guest arena; **your globals may not land here** |
@@ -207,8 +211,8 @@ the whole command protocol is exposed to the LAN, unauthenticated.
 | USB | none: the image is built `USB_DISABLED` |
 
 If you are not running modules, the ITCM and DTCM windows reserved for them are
-still reserved — the linker script is the same one. That is 96 KiB of ITCM and
-192 KiB of DTCM your host cannot use, in exchange for a module ABI you are not
+still reserved — the linker script is the same one. That is 128 KiB of ITCM (96
+with `--host-code-kib 96`) and 192 KiB of DTCM your host cannot use, in exchange for a module ABI you are not
 using either. A host that will never load a module could generate a different
 script; nothing in the loader requires the module windows to exist, only that the
 image is linked for the slot and passes `vm_host_slot_valid`.

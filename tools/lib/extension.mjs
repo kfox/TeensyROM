@@ -11,7 +11,7 @@ import { VM_BASE, VM_LIMIT } from './hex.mjs';
 
 export const IMAGE_MAGIC = 0x314d564d;  // 'MVM1'
 export const ABI = 2;
-export const CODE_BASE = 0x18000, CODE_LIMIT = 0x30000;
+export const CODE_BASE = 0x18000, CODE_LIMIT = 0x30000, CODE_BASE_128K = 0x10000;
 export const DATA_BASE = 0x20014000, DATA_LIMIT = 0x20044000;
 export const DATA_BYTES = DATA_LIMIT - DATA_BASE;
 // Profile 0 lends the guest all of RAM2. Profile 1 holds back the top 16 KiB,
@@ -24,10 +24,10 @@ export const RAM2_RO_BYTES = 80 * 1024;
 export const PROFILE_LEGACY = 0, PROFILE_RAM2_RO = 1;
 export const SERVICE = {
   FILES: 1, CLOCK: 2, PACKETS: 4, WRITE: 8, GUEST_RAM: 16, RAM2_RO: 128,
-  EXIT: 16384,
+  EXIT: 16384, CODE_128K: 0x200000,
 };
 export const BASE_SERVICES = SERVICE.FILES | SERVICE.CLOCK | SERVICE.PACKETS | SERVICE.WRITE | SERVICE.GUEST_RAM;
-export const HOST_SERVICES = BASE_SERVICES | SERVICE.RAM2_RO | SERVICE.EXIT;
+export const HOST_SERVICES = BASE_SERVICES | SERVICE.RAM2_RO | SERVICE.EXIT | SERVICE.CODE_128K;
 // The service registry from VMABI.h. checkServiceRegistry in
 // tools/verify-extensions.mjs holds these in step with VM_SERVICES_ASSIGNED.
 export const SERVICE_EXAMPLE = 0x10000;  // registry bit 16, this repository's own examples

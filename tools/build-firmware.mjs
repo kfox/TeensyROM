@@ -40,7 +40,8 @@
 //            the host image into the kept build root and writes no .TRH.
 //   --host-code-kib 64|96  with --host-sketch only: how much ITCM the host's code may
 //            fill. The default, 64, is what the stock host is linked at. 96 lets a
-//            third-party host's code grow up to the module window at 0x18000.
+//            third-party host's code grow up to the module window at 0x18000, and
+//            a host linked that way cannot serve service bit 21, the 128 KiB window.
 //
 // --ccache routes compiles through ccache (which must be on PATH; not supported on Windows).
 // Two things that only matter with it on: the build root is a fixed run-ccache-<target>
@@ -69,11 +70,12 @@ import { scanArgs } from './lib/cli-args.mjs';
 import { definesMacro } from './lib/source-text.mjs';
 import { combineHex, FLASH_BASE, MAIN_BASE, VM_BASE } from './lib/hex.mjs';
 import { buildHostPackage, parseHostPackage, hostDescriptor, hostNameForDisplay,
-         HOST_SLOT_BYTES } from './lib/extension.mjs';
+         HOST_SLOT_BYTES, SERVICE } from './lib/extension.mjs';
 import { hostImageFromHex } from './build-host-package.mjs';
 import {
   minimalLinkerScript, mainLinkerScript, extensionLinkerScript, extensionBootdata, VM_EXTENSIONS_DEFINE,
   patchStartupForUsbDisabled, patchYieldForUsbDisabled, flashBudget, HOST_CODE_KIB, DEFAULT_HOST_CODE_KIB,
+  hostServesCode128K,
 } from './lib/extension-image.mjs';
 
 const TEENSY_CORE_VERSION = '1.61.0';
@@ -562,6 +564,10 @@ if (!skipCombine && extensionImage) {
   const pkg = buildHostPackage({ image: hostImageFromHex(read(extensionImage.hex)) });
   const header = parseHostPackage(pkg);
   const id = hostDescriptor(pkg.subarray(header.headerBytes));
+  if ((id.services & SERVICE.CODE_128K) && !hostServesCode128K(hostCodeKiB)) {
+    throw new Error(`Host "${hostNameForDisplay(id.name)}" claims service bit 21, the 128 KiB module window, ` +
+      `but its code is linked with a ${hostCodeKiB} KiB budget that overlaps it`);
+  }
   write(hostOutput, pkg);
   console.log(`  Host "${hostNameForDisplay(id.name)}", ABI ${id.abi}, services 0x${id.services.toString(16).padStart(8, '0')}`);
   console.log(`  ${(header.payloadBytes / 1024).toFixed(1)}K of ${(HOST_SLOT_BYTES / 1024).toFixed(0)}K slot` +

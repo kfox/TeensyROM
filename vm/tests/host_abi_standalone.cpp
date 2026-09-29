@@ -37,6 +37,81 @@ static const uint32_t slotVectors[][5] = {
     { 0x42464346u, 0x432000d1u, VM_HOST_SLOT_BASE + 0x1001u, VM_HOST_SLOT_BASE, VM_HOST_SLOT_BYTES + 1u },
 };
 
+// The code-window fields of an image in each window, filled to VM_CODE_LIMIT.
+static VmImageHeader window96() {
+    VmImageHeader h{};
+    h.code_base = VM_CODE_BASE;
+    h.code_bytes = VM_CODE_LIMIT - VM_CODE_BASE;
+    return h;
+}
+
+static VmImageHeader window128() {
+    VmImageHeader h{};
+    h.code_base = VM_CODE_BASE_128K;
+    h.required_services = VM_SERVICE_CODE_128K;
+    h.code_bytes = VM_CODE_LIMIT - VM_CODE_BASE_128K;
+    return h;
+}
+
+// Regions 11 and 12, which vm_host_code_window() programs from this. Written out
+// as the addresses and sizes they must be, rather than derived.
+static void checkCodeWindowRegions() {
+    struct Expected { VmImageHeader h; uint32_t base0, bytes0, size0; };
+    VmImageHeader unasked = window128();
+    unasked.required_services = 0;
+    const Expected cases[] = {
+        { window96(), 0x18000u, 0x8000u, 14 },
+        { window128(), 0x10000u, 0x10000u, 15 },
+        { unasked, 0x18000u, 0x8000u, 14 },   // 0x10000 without the bit gets the narrow window
+    };
+    for (const auto &c : cases) {
+        const VmMpuRegion lower = vm_code_window_region(c.h, 0), upper = vm_code_window_region(c.h, 1);
+        assert(lower.base == c.base0 && lower.bytes == c.bytes0);
+        assert(vm_mpu_size_field(lower.bytes) == c.size0);
+        assert(upper.base == 0x20000u && upper.bytes == 0x10000u && vm_mpu_size_field(upper.bytes) == 15);
+        assert(lower.base + lower.bytes == upper.base && upper.base + upper.bytes == VM_CODE_LIMIT);
+        const VmMpuRegion regions[] = { lower, upper };
+        for (const VmMpuRegion &r : regions) {
+            assert(r.bytes >= 32 && (r.bytes & (r.bytes - 1)) == 0 && r.base % r.bytes == 0);
+            assert(2u << vm_mpu_size_field(r.bytes) == r.bytes);
+        }
+    }
+}
+
+// The table vm_entry returns, judged against the window its own image loaded into.
+static void checkModuleTables() {
+    const VmImageHeader small = window96(), large = window128();
+    const VmImageHeader windows[] = { small, large };
+    for (const VmImageHeader &h : windows) {
+        const uint32_t base = h.code_base, end = base + h.code_bytes;
+        assert(vm_module_table_placed(h, base) && vm_module_table_placed(h, VM_CODE_LIMIT - sizeof(VmModule)));
+        assert(!vm_module_table_placed(h, base - 4) && !vm_module_table_placed(h, VM_CODE_LIMIT - sizeof(VmModule) + 1));
+        assert(!vm_module_table_placed(h, VM_DATA_BASE));
+        assert(vm_module_code_pointer(h, base | 1) && vm_module_code_pointer(h, (end - 2) | 1));
+        assert(!vm_module_code_pointer(h, base) && !vm_module_code_pointer(h, end | 1));
+        assert(!vm_module_code_pointer(h, (base - 2) | 1));
+    }
+    // 0x10000..0x18000 is code only for the image that loaded there.
+    assert(vm_module_table_placed(large, 0x10000u) && !vm_module_table_placed(small, 0x10000u));
+    assert(vm_module_code_pointer(large, 0x10001u) && !vm_module_code_pointer(small, 0x10001u));
+    // A callback past the code actually loaded is refused even inside the window.
+    VmImageHeader loaded = large;
+    loaded.code_bytes = 0x100;
+    assert(vm_module_code_pointer(loaded, 0x100ffu) && !vm_module_code_pointer(loaded, 0x10101u));
+
+    auto callback = [](uintptr_t p) { return reinterpret_cast<void (*)()>(p); };
+    VmModule table{};
+    table.abi = VM_ABI;
+    table.bytes = sizeof(VmModule);
+    table.input = reinterpret_cast<void (*)(const VmInput *)>(uintptr_t(0x10001u));
+    table.pump = callback(0x10101u);
+    table.packet = reinterpret_cast<bool (*)(VmPacket *)>(uintptr_t(0x1fff1u));
+    table.ack = callback(0x2fff1u);
+    assert(vm_module_fields_valid(table, large) && !vm_module_fields_valid(table, small));
+    table.abi++;
+    assert(!vm_module_fields_valid(table, large));
+}
+
 static void printSlotVerdicts() {
     for (const auto &v : slotVectors) {
         printf("SLOTVALID %08x %08x %08x %08x %08x %d\n", v[0], v[1], v[2], v[3], v[4],
@@ -95,9 +170,17 @@ int main() {
     wants.required_services = VM_SERVICES | 0x10000u;
     assert(!vm_host_serves(wants, VM_HOST_SERVICES));
     assert(vm_host_serves(wants, VM_HOST_SERVICES | 0x10000u));
+    // A 128 KiB image is refused by a host linked over that window, and only there.
+    const VmImageHeader large = window128();
+    assert(vm_host_serves(large, VM_HOST_SERVICES));
+    assert(!vm_host_serves(large, VM_HOST_SERVICES & ~VM_SERVICE_CODE_128K));
+    assert(vm_host_serves(window96(), VM_HOST_SERVICES & ~VM_SERVICE_CODE_128K));
 
     // Loading a module. vm_module_table_valid gets no accept case: the code
-    // window is a fixed ITCM address no native allocation can land on.
+    // window is a fixed ITCM address no native allocation can land on, so its
+    // two halves are checked on their own.
+    checkCodeWindowRegions();
+    checkModuleTables();
     VmImageHeader image{};
     image.code_bytes = 4;
     uint8_t code[4] = {}, data[4] = {};
@@ -105,7 +188,7 @@ int main() {
     CountingReader reader;
     assert(!vm_load_payload(image, reader, code, data, nullptr, failure));
     assert(failure == 0x13 && reads == 1);
-    assert(!vm_module_table_valid(reinterpret_cast<const VmModule *>(VM_DATA_BASE), 4));
+    assert(!vm_module_table_valid(reinterpret_cast<const VmModule *>(VM_DATA_BASE), window96()));
 
     printSlotVerdicts();
     puts("PASS: the published host contract compiles and runs with no TeensyROM include path");
