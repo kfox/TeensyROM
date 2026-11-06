@@ -475,6 +475,7 @@ FLASHMEM void SpecialBtn_REU(bool Up_nDn)
 
 FLASHMEM void InitHndlr_REU()
 {
+   NumREU_Banks = 0; return; // bisect: hooks only, no init
    FreeREU(); // free reu memory
    PendingfBusSnoop = NULL; //not fBusSnoop directly -- may race a pending PRG-load handshake, see HandshakeSnoop
    //set reg defaults:
