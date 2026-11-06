@@ -60,10 +60,10 @@ stcIOHandlers IOHndlr_REU =
   "512KB REU",         //Name of handler
   &InitHndlr_REU,      //Called once at handler startup
   NULL,                //IO1 R/W handler
-  &IO2Hndlr_REU,       //IO2 R/W handler
+  NULL,                //IO2 R/W handler (bisect: init only, no hooks)
   NULL,                //ROML Read handler, in addition to any ROM data sent
   NULL,                //ROMH Read handler, in addition to any ROM data sent
-  &PollingHndlr_REU,   //Polled in main routine
+  NULL,                //Polled in main routine (bisect)
   NULL,                //called at the end of EVERY c64 cycle
 };
 
