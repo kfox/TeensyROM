@@ -55,6 +55,11 @@ void DMAWaitAssertReady()
    DMA_State = DMA_AutoRun ? DMA_S_TransferExecuting : DMA_S_TransferReady;
 }
 
+// Debug: strict waits until BA was low on the read before as well, so the 6510 was already held
+// by RDY when DMA drops its AEC; lax is the shipped behavior.  Counted either way.
+volatile bool DMA_BAStrict, DMA_BAPrevLow;
+volatile uint32_t DMA_AsynchStarts, DMA_BAFirstLow, DMA_BALaterLow;
+
 //Phi2 rising edge:
 FASTRUN void isrPHI2() 
 {
@@ -166,9 +171,16 @@ FASTRUN void isrPHI2()
                //   https://codebase64.com/lib/exe/fetch.php?media=base:safely_freezing_the_c64.pdf
                
                DMACycleCount = 0; //initialize for timeout
+               DMA_AsynchStarts++;
+               DMA_BAPrevLow = false;
                if (R_Wn) //Read
                {
-                  if(!GP9_BA(ReadGPIO9)) DMAWaitAssertReady(); // start during any bad line read
+                  if(!GP9_BA(ReadGPIO9))
+                  {
+                     DMA_BAFirstLow++;
+                     if (DMA_BAStrict) { DMA_BAPrevLow = true; DMA_State = DMA_S_StartAsynch_Wait_LRd; }
+                     else DMAWaitAssertReady(); // start during any bad line read
+                  }
                   else DMA_State = DMA_S_StartAsynch_Wait_LRd ;
                }
                else DMA_State = DMA_S_StartAsynch_Wait_LWr;
@@ -181,9 +193,19 @@ FASTRUN void isrPHI2()
             case DMA_S_StartAsynch_Wait_LRd: //Last cycle was a read
                if (R_Wn) //Read
                {
-                  if(!GP9_BA(ReadGPIO9)) DMAWaitAssertReady(); // start during any bad line read
+                  if(!GP9_BA(ReadGPIO9))
+                  {
+                     if (DMA_BAPrevLow) { DMA_BALaterLow++; DMAWaitAssertReady(); }
+                     else
+                     {
+                        DMA_BAFirstLow++;
+                        if (DMA_BAStrict) DMA_BAPrevLow = true;
+                        else DMAWaitAssertReady(); // start during any bad line read
+                     }
+                  }
                   else 
                   {
+                     DMA_BAPrevLow = false;
                      //Another Read, no state change
                      if (DMACycleCount++ > DMA_TIMEOUT_CYCLES) DMAWaitAssertReady(); // Timeout, assume read loop and assert
                   }

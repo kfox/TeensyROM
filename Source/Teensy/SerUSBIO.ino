@@ -589,6 +589,9 @@ FLASHMEM void ProcessCommand()
       case SampleWatchToken: //Count C64 writes to one address
          SampleWatchCommand();
          return;
+      case BAStrictToken: //Debug: set the badline DMA start rule, take its counters
+         BAStrictCommand();
+         return;
       case ReadC64MemToken: //Write to C64 mem via DMA
          ReadC64MemCommand();
          return;
@@ -1460,6 +1463,34 @@ FLASHMEM void SampleWatchCommand()
    SendU32(Stats.Unlocked);
    SendU32(F_CPU_ACTUAL);
 }
+
+#ifdef Fab04_FullDMACapable
+// Receive <-- BAStrictToken (0x64F7), Mode: 0 = lax (shipped), 1 = strict, 2 = leave as is
+// Send --> AckToken, strict now (1), asynch starts (4), BA-low reads on the first BA-low cycle (4),
+//          asserts on a later BA-low cycle (4); counters since the last call, Low first
+FLASHMEM void BAStrictCommand()
+{
+   uint32_t Mode;
+   if (!GetUInt(&Mode, 1) || Mode > 2)
+   {
+      SendU16(FailToken);
+      CmdChannel->println("Mode must be 0, 1 or 2");
+      return;
+   }
+   extern volatile bool DMA_BAStrict;
+   extern volatile uint32_t DMA_AsynchStarts, DMA_BAFirstLow, DMA_BALaterLow;
+   if (Mode < 2) DMA_BAStrict = Mode;
+   __disable_irq();
+   const uint32_t Starts = DMA_AsynchStarts, First = DMA_BAFirstLow, Later = DMA_BALaterLow;
+   DMA_AsynchStarts = DMA_BAFirstLow = DMA_BALaterLow = 0;
+   __enable_irq();
+   SendU16(AckToken);
+   CmdChannel->write(DMA_BAStrict ? 1 : 0);
+   SendU32(Starts);
+   SendU32(First);
+   SendU32(Later);
+}
+#endif
 
 // Command:
 // read sequential C64 memory segment and send to host
