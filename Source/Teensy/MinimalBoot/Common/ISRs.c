@@ -55,10 +55,13 @@ void DMAWaitAssertReady()
    DMA_State = DMA_AutoRun ? DMA_S_TransferExecuting : DMA_S_TransferReady;
 }
 
-// Debug: strict waits until BA was low on the read before as well, so the 6510 was already held
-// by RDY when DMA drops its AEC; lax is the shipped behavior.  Counted either way.
-volatile bool DMA_BAStrict, DMA_BAPrevLow;
-volatile uint32_t DMA_AsynchStarts, DMA_BAFirstLow, DMA_BALaterLow;
+// Debug: which asynch start rule runs.  Lax is the shipped one.  Strict waits until BA was low on
+// the read before as well, so RDY already held the 6510.  BAOnly asserts only on a badline read,
+// NoBA only on a read after a write; either one forces every start through one branch.
+enum DMABARules { BARule_Lax, BARule_Strict, BARule_BAOnly, BARule_NoBA };
+volatile uint8_t DMA_BARule;
+volatile bool DMA_BAPrevLow;
+volatile uint32_t DMA_AsynchStarts, DMA_BAFirstLow, DMA_BALaterLow, DMA_AfterWrite, DMA_Timeouts;
 
 //Phi2 rising edge:
 FASTRUN void isrPHI2() 
@@ -173,33 +176,20 @@ FASTRUN void isrPHI2()
                DMACycleCount = 0; //initialize for timeout
                DMA_AsynchStarts++;
                DMA_BAPrevLow = false;
-               if (R_Wn) //Read
-               {
-                  if(!GP9_BA(ReadGPIO9))
-                  {
-                     DMA_BAFirstLow++;
-                     if (DMA_BAStrict) { DMA_BAPrevLow = true; DMA_State = DMA_S_StartAsynch_Wait_LRd; }
-                     else DMAWaitAssertReady(); // start during any bad line read
-                  }
-                  else DMA_State = DMA_S_StartAsynch_Wait_LRd ;
-               }
+               if (R_Wn) DMA_State = DMA_S_StartAsynch_Wait_LRd;
                else DMA_State = DMA_S_StartAsynch_Wait_LWr;
-               return;
-            case DMA_S_StartAsynch_Wait_LWr: //Last cycle was a write
-               if (R_Wn) DMAWaitAssertReady(); //Last was a write, this is a read, assert!
-                  //else another write, no state change
-                  //Check for timeout? Continuous writes is not a real-worls situation
-               return;             
+               //fall through: this read gets the same test as any later one
             case DMA_S_StartAsynch_Wait_LRd: //Last cycle was a read
+            ReadAfterRead:
                if (R_Wn) //Read
                {
-                  if(!GP9_BA(ReadGPIO9))
+                  if(!GP9_BA(ReadGPIO9) && DMA_BARule != BARule_NoBA)
                   {
                      if (DMA_BAPrevLow) { DMA_BALaterLow++; DMAWaitAssertReady(); }
                      else
                      {
                         DMA_BAFirstLow++;
-                        if (DMA_BAStrict) DMA_BAPrevLow = true;
+                        if (DMA_BARule == BARule_Strict) DMA_BAPrevLow = true;
                         else DMAWaitAssertReady(); // start during any bad line read
                      }
                   }
@@ -207,10 +197,20 @@ FASTRUN void isrPHI2()
                   {
                      DMA_BAPrevLow = false;
                      //Another Read, no state change
-                     if (DMACycleCount++ > DMA_TIMEOUT_CYCLES) DMAWaitAssertReady(); // Timeout, assume read loop and assert
+                     if (DMACycleCount++ > DMA_TIMEOUT_CYCLES) { DMA_Timeouts++; DMAWaitAssertReady(); } // Timeout, assume read loop and assert
                   }
                }
                else DMA_State = DMA_S_StartAsynch_Wait_LWr;
+               return;
+            case DMA_S_StartAsynch_Wait_LWr: //Last cycle was a write
+               if (R_Wn)
+               {
+                  if (DMA_BARule == BARule_BAOnly) { DMA_State = DMA_S_StartAsynch_Wait_LRd; goto ReadAfterRead; }
+                  DMA_AfterWrite++;
+                  DMAWaitAssertReady(); //Last was a write, this is a read, assert!
+               }
+                  //else another write, no state change
+                  //Check for timeout? Continuous writes is not a real-worls situation
                return;    
 
             case DMA_S_StartImmediate:
